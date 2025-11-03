@@ -56,18 +56,12 @@ class ToolTrainer(Trainer):
         metric_key_prefix: str = "eval",
     ) -> Dict[str, float]:
         """
-        Runs default Trainer.evaluate() to get eval_loss etc.
-        Then on rank 0 also:
+        Runs:
           - eval_perplexity on eval_dataset
           - eval_tool_calls on tool_eval_examples
         Aggregates and logs all metrics.
         """
-        # base HF eval (computes loss etc)
-        metrics = super().evaluate(
-            eval_dataset=eval_dataset,
-            ignore_keys=ignore_keys,
-            metric_key_prefix=metric_key_prefix,
-        )
+        metrics = {}
 
         # only main process computes heavy custom eval
         if self.is_world_process_zero():
@@ -105,7 +99,7 @@ class ToolTrainer(Trainer):
 
             # log to Trainer's logger and persist to disk under output_dir
             self.log(metrics)
-            self.save_metrics(metric_key_prefix, metrics)
+            self.save_metrics(split=metric_key_prefix, metrics=metrics)
 
         return metrics
 

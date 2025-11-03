@@ -43,7 +43,7 @@ train:
   per_device_eval_batch_size: 2
   gradient_accumulation_steps: 4
   gradient_checkpointing: false
-  num_train_epochs: 3
+  num_train_epochs: 5
 
   learning_rate: 0.0002
   weight_decay: 0.0
@@ -55,8 +55,9 @@ train:
 
   ddp_find_unused_parameters: false
 
-  logging_steps: 10
-  eval_strategy: "epoch"
+  logging_steps: 5
+  eval_strategy: "steps"
+  eval_steps: 20
   save_strategy: "epoch"
   save_total_limit: 2
   overwrite_output_dir: false

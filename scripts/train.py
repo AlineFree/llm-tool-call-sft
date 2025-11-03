@@ -55,6 +55,7 @@ def main():
     (
         train_dataset,
         eval_dataset,
+        eval_dataset_short,
         tool_eval_examples,
         global_tools,
         max_ctx,
@@ -70,7 +71,7 @@ def main():
         model=model,
         args=training_args,
         train_dataset=train_dataset,
-        eval_dataset=eval_dataset,
+        eval_dataset=eval_dataset_short,
         data_collator=data_collator,
         processing_class=tokenizer,
         tokenizer_for_tools=tokenizer,
@@ -80,8 +81,10 @@ def main():
         temperature_eval=cfg["eval"]["temperature"],
     )
 
+    trainer.evaluate(eval_dataset, metric_key_prefix="eval_full")
     trainer.train()
     trainer.save_model()
+    trainer.evaluate(eval_dataset, metric_key_prefix="eval_full")
     trainer.push_to_hub(commit_message="train: finish")
 
 

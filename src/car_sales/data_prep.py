@@ -1,4 +1,4 @@
-from typing import Dict, Any, Tuple, List
+from typing import Dict, Any, Tuple, List, Optional
 from functools import partial
 
 import random
@@ -108,10 +108,10 @@ def _build_tool_eval_examples(
     raw_test_split: Dataset,
     base_sysprompt_text: str,
     timezone_str: str,
-    global_tools: List[Dict[str, Any]],
-    n_sessions: int,
+    n_sessions: Optional[int],
 ):
     raw_sessions = []
+    n_sessions = n_sessions or len(raw_test_split)
     limit = min(n_sessions, len(raw_test_split))
 
     for i in range(limit):
@@ -135,7 +135,7 @@ def _build_tool_eval_examples(
 
 def build_datasets(
     cfg: Dict[str, Any],
-) -> Tuple[Dataset, Dataset, List[Any], List[Dict[str, Any]], int]:
+) -> Tuple[Dataset, Dataset, List[Any], List[Any], List[Dict[str, Any]], int]:
     """
     End-to-end dataset prep for this domain.
 
@@ -150,11 +150,11 @@ def build_datasets(
     5. build tool_eval_examples
 
     Returns
-      train_dataset        (tokenized + filtered)
-      eval_dataset         (tokenized + filtered)
-      tool_eval_examples   (list[ToolEvalTurn])
-      global_tools         (tool schemas)
-      max_ctx              (int)
+      train_dataset (tokenized + filtered)
+      eval_dataset (tokenized + filtered)
+      tool_eval_examples (list[ToolEvalTurn])
+      global_tools (tool schemas)
+      max_ctx (int)
     """
 
     data_cfg = cfg["data"]
@@ -208,6 +208,7 @@ def build_datasets(
 
     # 4. context filtering
     max_ctx = int(data_cfg["max_context_length"])
+    max_gen = int(cfg["eval"]["max_generation_length"])
 
     if data_cfg["drop_oversized"]:
         train_proc = train_proc.filter(
@@ -215,7 +216,7 @@ def build_datasets(
             desc="filter train oversized",
         )
         test_proc = test_proc.filter(
-            lambda ex: within_ctx(ex, max_ctx),
+            lambda ex: within_ctx(ex, max_ctx - max_gen),
             desc="filter test oversized",
         )
 
@@ -224,14 +225,18 @@ def build_datasets(
         raw_test_split=ds["test"],
         base_sysprompt_text=base_sysprompt_text,
         timezone_str=timezone_str,
-        global_tools=global_tools,
-        n_sessions=data_cfg["n_tool_sessions_eval"],
+        n_sessions=None,
+    )
+    tool_eval_examples_short = random.sample(
+        tool_eval_examples,
+        k=min(data_cfg["n_tool_sessions_eval"], len(tool_eval_examples)),
     )
 
     return (
         train_proc,
         test_proc,
         tool_eval_examples,
+        tool_eval_examples_short,
         global_tools,
         max_ctx,
     )
