@@ -29,7 +29,7 @@ repo/
 ├─ src/
 │  ├─ car_sales/
 │  │  ├─ __init__.py            # exposes build_datasets(cfg)
-│  │  ├─ prompts.py             # system prompt assembly, timestamp logic
+│  │  ├─ prompt.py             # system prompt assembly, timestamp logic
 │  │  └─ data_prep.py           # dataset mapping, tokenization, filtering
 │  │
 │  └─ trainer/
@@ -69,13 +69,8 @@ High-level flow:
 Every run is driven by a YAML file in `configs/`. Example key blocks:
 
 ```yaml
-run:
-  output_dir: "checkpoints/car-sales-sft"
-  seed: 42
-  report_to: "none"      # "none", "wandb", "tensorboard"
-
 data:
-  load_module: "car_sales"                # which domain package to import
+  load_module: "car_sales"
   dataset_name: "Salesteq/car-sales-convos"
   timezone: "Europe/Zurich"
   sysprompt_path: "data/sysprompt.md"
@@ -88,8 +83,8 @@ data:
 
 model:
   base_model_name: "viktoroo/SmolLM2-360M-Tools"
-  torch_dtype: "bfloat16"        # "bfloat16", "float16", "float32"
-  pad_token_fallback: "eos"      # if no pad token, reuse eos token
+  torch_dtype: "bfloat16"
+  pad_token_fallback: "eos"
 
 lora:
   r: 64
@@ -107,17 +102,28 @@ lora:
   task_type: "CAUSAL_LM"
 
 train:
-  per_device_train_batch_size: 2
-  per_device_eval_batch_size: 2
+  # basic
+  output_dir: "checkpoints/car-sales-sft"
+  seed: 42
+
+  # logging
+  report_to: "wandb"
+
+  # core trainer args
+  per_device_train_batch_size: 1
+  per_device_eval_batch_size: 1
   gradient_accumulation_steps: 8
+  gradient_checkpointing: true
   num_train_epochs: 3
+
   learning_rate: 0.0002
   weight_decay: 0.0
   lr_scheduler_type: "cosine"
-  warmup_ratio: 0.03
+  warmup_ratio: 0.1
 
   bf16: true
   fp16: false
+
   ddp_find_unused_parameters: false
 
   logging_steps: 10
@@ -127,6 +133,11 @@ train:
   overwrite_output_dir: false
   remove_unused_columns: false
 
+  # hub
+  push_to_hub: true
+  hub_model_id: "Salesteq/SmolLM2-360M-CarSales"
+  hub_private_repo: true
+
 eval:
   max_new_tokens_eval: 256
   temperature: 0.0
@@ -134,7 +145,6 @@ eval:
 
 What each section controls:
 
-* `run`: global run behavior. Output directory, RNG seed, logging backend.
 * `data`: dataset-specific choices. Where to load the HF dataset from, which domain code to use, how long sequences are allowed to be, which tokenizer to use for tokenization, how many eval sessions to sample for tool-call metrics.
 * `model`: base LM load settings. Which pretrained model to start from, precision, and how to set pad token if missing.
 * `lora`: LoRA adapter config. Rank, alpha, dropout, and which module names to inject adapters into.
