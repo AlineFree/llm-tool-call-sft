@@ -71,10 +71,6 @@ class ToolTrainer(Trainer):
             self.log(metrics)
             self.save_metrics(split=metric_key_prefix, metrics=metrics)
 
-        # let everyone reach here
-        if self.args.local_rank != -1:
-            torch.distributed.barrier()
-
         return metrics
 
 

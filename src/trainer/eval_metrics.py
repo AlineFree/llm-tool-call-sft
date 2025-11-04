@@ -17,11 +17,24 @@ IGNORE_INDEX = -100
 # helpers
 ############################################
 
+def _is_fsdp(m) -> bool:
+    """
+    Return True for torch.distributed.fsdp.FullyShardedDataParallel
+    without importing it explicitly.
+    """
+    cls = m.__class__.__name__
+    module = m.__class__.__module__
+    return cls == "FullyShardedDataParallel" or "fsdp" in module.lower()
+
+
 def _unwrap_model(m):
     """
-    Trainer may wrap the model in DDP.
-    Return the underlying model.
+    Unwrap DDP-like wrappers to get to the HF model for config access.
+    For FSDP we return the wrapper itself because forward/generate must
+    go through it.
     """
+    if _is_fsdp(m):
+        return m
     return m.module if hasattr(m, "module") else m
 
 
@@ -39,57 +52,70 @@ def eval_perplexity(
     """
     Compute mean loss over non-ignored tokens and perplexity.
 
-    model: HF causal LM with .config.pad_token_id or .config.eos_token_id
-    dataset: HF Dataset with columns:
-        input_ids [T], attention_mask [T], labels [T]
-    batch_size: eval batch size
-    device: torch.device to run on
+    Works with:
+    - plain HF models
+    - DDP-wrapped models
+    - FSDP-wrapped models
     """
-    model = _unwrap_model(model)
-    model.eval()
-    model.to(device)
+    # wrapper we must call
+    exec_model = model
+    # inner for config
+    base_model = _unwrap_model(model)
+
+    exec_model.eval()
+
+    # only move plain models; DDP/FSDP are already placed
+    if not _is_fsdp(exec_model) and not hasattr(exec_model, "module"):
+        exec_model.to(device)
+
+    pad_id = getattr(base_model.config, "pad_token_id", None)
+    if pad_id is None:
+        pad_id = base_model.config.eos_token_id
+
+    def _collate(batch):
+        input_ids = [b["input_ids"] for b in batch]
+        attention_mask = [b["attention_mask"] for b in batch]
+        labels = [b["labels"] for b in batch]
+
+        return {
+            "input_ids": torch.nn.utils.rnn.pad_sequence(
+                input_ids,
+                batch_first=True,
+                padding_value=pad_id,
+            ),
+            "attention_mask": torch.nn.utils.rnn.pad_sequence(
+                attention_mask,
+                batch_first=True,
+                padding_value=0,
+            ),
+            "labels": torch.nn.utils.rnn.pad_sequence(
+                labels,
+                batch_first=True,
+                padding_value=IGNORE_INDEX,
+            ),
+        }
 
     dl = DataLoader(
         dataset,
         batch_size=batch_size,
         shuffle=False,
-        collate_fn=lambda batch: {
-            "input_ids": torch.nn.utils.rnn.pad_sequence(
-                [b["input_ids"] for b in batch],
-                batch_first=True,
-                padding_value=(
-                    model.config.pad_token_id
-                    if getattr(model.config, "pad_token_id", None) is not None
-                    else model.config.eos_token_id
-                ),
-            ),
-            "attention_mask": torch.nn.utils.rnn.pad_sequence(
-                [b["attention_mask"] for b in batch],
-                batch_first=True,
-                padding_value=0,
-            ),
-            "labels": torch.nn.utils.rnn.pad_sequence(
-                [b["labels"] for b in batch],
-                batch_first=True,
-                padding_value=IGNORE_INDEX,
-            ),
-        },
+        collate_fn=_collate,
     )
 
     total_loss = 0.0
     total_tokens = 0
 
     for batch in tqdm(dl, desc="eval_perplexity", leave=False):
-        input_ids = batch["input_ids"].to(device)
-        attention_mask = batch["attention_mask"].to(device)
-        labels = batch["labels"].to(device)
+        input_ids = batch["input_ids"].to(device, non_blocking=True)
+        attention_mask = batch["attention_mask"].to(device, non_blocking=True)
+        labels = batch["labels"].to(device, non_blocking=True)
 
-        out = model(
+        out = exec_model(
             input_ids=input_ids,
             attention_mask=attention_mask,
             labels=labels,
         )
-        loss = out.loss  # scalar
+        loss = out.loss
 
         valid_count = (labels != IGNORE_INDEX).sum().item()
         total_loss += loss.item() * valid_count
@@ -108,12 +134,8 @@ def eval_perplexity(
 ############################################
 # 2. Tool-call eval
 ############################################
-# Metrics:
-# - precision / recall / F1 of function names when tools are expected
-# - argument exact match rate
-# - argument JSON parse success rate
-# - hallucination rate when no tool call should be made
-
+# (unchanged parts omitted where possible)
+############################################
 
 @dataclass
 class ToolEvalTurn:
@@ -127,10 +149,6 @@ def _deterministic_shuffle_tools(
     tools: List[Dict[str, Any]],
     session_id: str,
 ):
-    """
-    Deterministically shuffle tool list using session_id.
-    Matches training behavior where tool ordering is per-session stable.
-    """
     h = hashlib.sha256(session_id.encode("utf-8")).hexdigest()
     seed_int = int(h[:16], 16)
     rng = random.Random(seed_int)
@@ -140,22 +158,6 @@ def _deterministic_shuffle_tools(
 
 
 def prepare_tool_eval_examples(raw_sessions: List[Dict[str, Any]]) -> List[ToolEvalTurn]:
-    """
-    Build ToolEvalTurn objects for eval.
-
-    raw_sessions[i] must be:
-        {
-            "session_id": str,
-            "messages": [ ... ]  # chat messages including system/user/assistant/tool
-        }
-
-    For every assistant turn in each session:
-    - context_messages is everything before that assistant turn
-    - gold_tool_calls is assistant.tool_calls or []
-    - has_tools is bool(tool_calls)
-
-    Return flat list of ToolEvalTurn.
-    """
     eval_examples: List[ToolEvalTurn] = []
 
     for sess in raw_sessions:
@@ -183,20 +185,11 @@ def prepare_tool_eval_examples(raw_sessions: List[Dict[str, Any]]) -> List[ToolE
     return eval_examples
 
 
-############################################
-# 2a. generation helpers
-############################################
-
 def _build_generation_input(
     tokenizer,
     context_messages: List[Dict[str, Any]],
     tools_shuffled: List[Dict[str, Any]],
 ) -> torch.LongTensor:
-    """
-    Build model input_ids for next-turn generation.
-    We rely on add_generation_prompt=True so tokenizer will append
-    the assistant preamble.
-    """
     input_ids = tokenizer.apply_chat_template(
         context_messages,
         tools=tools_shuffled,
@@ -205,7 +198,6 @@ def _build_generation_input(
         chat_template_kwargs={"enable_thinking": False},
         return_tensors="pt",
     )
-    # shape [1, seq_len]
     return input_ids
 
 
@@ -218,23 +210,15 @@ def _generate_assistant_turn(
     max_new_tokens: int = 256,
     temperature: float = 0.0,
 ) -> str:
-    """
-    Generate assistant turn continuation for evaluation.
-
-    Greedy decode if temperature == 0.0.
-    """
     input_ids = _build_generation_input(
         tokenizer=tokenizer,
         context_messages=context_messages,
         tools_shuffled=tools_shuffled,
     ).to(device)
 
-    attention_mask = torch.ones_like(
-        input_ids,
-        dtype=torch.long,
-        device=device,
-    )
+    attention_mask = torch.ones_like(input_ids, dtype=torch.long, device=device)
 
+    # call the (possibly FSDP) model directly
     gen_ids = model.generate(
         input_ids=input_ids,
         attention_mask=attention_mask,
@@ -245,15 +229,10 @@ def _generate_assistant_turn(
         eos_token_id=tokenizer.eos_token_id,
     )[0]
 
-    # keep only generated continuation
     new_tokens = gen_ids[input_ids.shape[1]:]
     text = tokenizer.decode(new_tokens, skip_special_tokens=False)
     return text
 
-
-############################################
-# 2b. parsing tool calls from model output
-############################################
 
 _TOOL_CALL_BLOCK_RE = re.compile(
     r"<tool_call>(.*?)</tool_call>",
@@ -264,23 +243,6 @@ _TOOL_CALL_BLOCK_RE = re.compile(
 def _parse_predicted_tool_calls(
     generated_text: str,
 ) -> Tuple[List[Dict[str, Any]], int]:
-    """
-    Extract tool calls from generated_text.
-
-    We expect spans like:
-    <tool_call>{"function":{"name":"fn","arguments":{...}}}</tool_call>
-
-    Returns:
-      (predicted_calls, parse_failures)
-
-    predicted_calls[i] = {
-        "function": {
-            "name": str,
-            "arguments": <raw or json str>
-        }
-    }
-    parse_failures increments for any block we could not json.loads.
-    """
     predicted_calls: List[Dict[str, Any]] = []
     parse_failures = 0
 
@@ -289,9 +251,6 @@ def _parse_predicted_tool_calls(
         try:
             call_obj = json.loads(block_str)
         except Exception:
-            call_obj = None
-
-        if call_obj is None:
             parse_failures += 1
             continue
 
@@ -309,14 +268,6 @@ def _parse_predicted_tool_calls(
 
 
 def _normalize_args(arg_val: Any):
-    """
-    Normalize predicted or gold arguments to dict[str,str].
-    Returns None if parsing fails.
-
-    - If arg_val is dict: stringify leaf values.
-    - If arg_val is str: try json.loads then same.
-    - Else: None.
-    """
     if isinstance(arg_val, dict):
         obj = arg_val
     elif isinstance(arg_val, str):
@@ -333,31 +284,18 @@ def _normalize_args(arg_val: Any):
     return {k: str(v).strip() for k, v in obj.items()}
 
 
-############################################
-# 2c. metric math utilities
-############################################
-
 def _f1_precision_recall(
     true_fns: List[str],
     pred_fns: List[str],
 ) -> Tuple[float, float, float]:
-    """
-    Micro precision, recall, F1 over function name multisets.
-    """
     from collections import Counter
     gold_ct = Counter(true_fns)
     pred_ct = Counter(pred_fns)
 
     tp = sum(min(gold_ct[fn], pred_ct[fn]) for fn in pred_ct)
 
-    fp = sum(
-        max(pred_ct[fn] - gold_ct.get(fn, 0), 0)
-        for fn in pred_ct
-    )
-    fn = sum(
-        max(gold_ct[fn] - pred_ct.get(fn, 0), 0)
-        for fn in gold_ct
-    )
+    fp = sum(max(pred_ct[fn] - gold_ct.get(fn, 0), 0) for fn in pred_ct)
+    fn = sum(max(gold_ct[fn] - pred_ct.get(fn, 0), 0) for fn in gold_ct)
 
     prec = tp / (tp + fp) if (tp + fp) > 0 else 0.0
     rec = tp / (tp + fn) if (tp + fn) > 0 else 0.0
@@ -365,10 +303,6 @@ def _f1_precision_recall(
 
     return prec, rec, f1
 
-
-############################################
-# 2d. full tool-call eval
-############################################
 
 @torch.inference_mode()
 def eval_tool_calls(
@@ -381,29 +315,17 @@ def eval_tool_calls(
     temperature: float = 0.0,
 ):
     """
-    Evaluate tool-calling behavior.
-
-    Inputs:
-      model, tokenizer: HF model/tokenizer
-      examples: list[ToolEvalTurn]
-      global_tools: list of tool specs
-      device: model device
-      max_new_tokens: generation cap
-      temperature: decoding temperature
-
-    Returns dict with:
-      tool_call_precision
-      tool_call_recall
-      tool_call_name_f1
-      arg_exact_match_rate
-      arguments_parse_success_rate
-      no_tool_hallucination_rate
-      num_tool_turns
-      num_no_tool_turns
+    Same logic, but:
+    - do not .to(device) an FSDP/DDP model
+    - still access config via unwrapped model
     """
-    model = _unwrap_model(model)
-    model.eval()
-    model.to(device)
+    exec_model = model
+    base_model = _unwrap_model(model)
+
+    exec_model.eval()
+
+    if not _is_fsdp(exec_model) and not hasattr(exec_model, "module"):
+        exec_model.to(device)
 
     all_prec: List[float] = []
     all_rec: List[float] = []
@@ -419,7 +341,7 @@ def eval_tool_calls(
         )
 
         gen_text = _generate_assistant_turn(
-            model=model,
+            model=exec_model,
             tokenizer=tokenizer,
             context_messages=ex.context_messages,
             tools_shuffled=shuffled_tools,
@@ -431,13 +353,10 @@ def eval_tool_calls(
         pred_calls, parse_failures = _parse_predicted_tool_calls(gen_text)
         gold_calls = ex.gold_tool_calls
 
-        # hallucination metric:
-        # if gold expects no tools then model should emit none
         if not ex.has_tools:
             hallucinated = 1 if len(pred_calls) > 0 else 0
             hallucinated_flags.append(hallucinated)
 
-        # compute precision / recall / F1 and argument metrics
         if ex.has_tools:
             gold_fn_names = [c["function"]["name"] for c in gold_calls]
             pred_fn_names = [c["function"]["name"] for c in pred_calls]
@@ -450,7 +369,6 @@ def eval_tool_calls(
             all_rec.append(rec)
             all_f1.append(f1)
 
-            # argument match and parse success
             from collections import defaultdict, deque
             gold_by_fn = defaultdict(deque)
             for c in gold_calls:
@@ -482,7 +400,6 @@ def eval_tool_calls(
                 else:
                     arg_exact_flags.append(0)
 
-        # penalize malformed tool_call blocks
         for _ in range(parse_failures):
             arg_parse_success_flags.append(0)
             arg_exact_flags.append(0)
