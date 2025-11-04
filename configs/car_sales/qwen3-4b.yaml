@@ -6,7 +6,7 @@ data:
   tools_path: "data/tool_calls.json"
 
   tokenizer: "Qwen/Qwen3-4B-Instruct-2507"
-  max_context_length: 262144
+  max_context_length: 16384
   drop_oversized: true
   n_tool_sessions_eval: 64
 
@@ -43,7 +43,7 @@ train:
   per_device_eval_batch_size: 2
   gradient_accumulation_steps: 4
   gradient_checkpointing: false
-  num_train_epochs: 5
+  num_train_epochs: 4
 
   learning_rate: 0.0002
   weight_decay: 0.0
