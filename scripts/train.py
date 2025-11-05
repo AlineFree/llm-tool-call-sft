@@ -7,11 +7,11 @@ import random
 import numpy as np
 import torch
 import torch.distributed as dist
-from transformers import TrainingArguments
+from transformers import TrainingArguments, Trainer
 
 from trainer.lora_model import build_model_and_tokenizer
 from trainer.collate import make_causal_lm_collate_fn
-from trainer.tool_trainer import ToolTrainer
+from trainer.eval_metrics import eval_tool_calls
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -51,6 +51,41 @@ def barrier():
         dist.barrier()
 
 
+def run_tool_eval_and_log(
+    trainer: Trainer,
+    tokenizer,
+    tool_eval_examples,
+    global_tools,
+    max_ctx: int,
+    prefix: str,
+):
+    # ensure model+tokenizer on disk for vLLM
+    if is_main_process():
+        trainer.save_model()
+        if tokenizer is not None:
+            tokenizer.save_pretrained(trainer.args.output_dir)
+    barrier()
+
+    if not is_main_process():
+        barrier()
+        return
+
+    metrics = eval_tool_calls(
+        model_path=trainer.args.output_dir,
+        tokenizer=tokenizer,
+        examples=tool_eval_examples,
+        global_tools=global_tools,
+        max_model_len=max_ctx,
+        max_new_tokens=256,
+        temperature=0.0,
+        tensor_parallel_size=1,
+    )
+
+    trainer.log_metrics(prefix, metrics)
+    trainer.save_metrics(prefix, metrics)
+    barrier()
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, required=True, help="Path to YAML config")
@@ -78,7 +113,7 @@ def main():
 
     training_args = _build_training_args(cfg)
 
-    trainer = ToolTrainer(
+    trainer = Trainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
@@ -86,19 +121,18 @@ def main():
         data_collator=data_collator,
         processing_class=tokenizer,
         tokenizer_for_tools=tokenizer,
-        tool_eval_examples=tool_eval_examples,
-        global_tools=global_tools,
-        max_new_tokens_eval=cfg["eval"]["max_new_tokens_eval"],
-        temperature_eval=cfg["eval"]["temperature"],
-        n_short_eval_examples=cfg["data"]["n_tool_sessions_eval"],
     )
 
-    trainer.evaluate(eval_dataset, metric_key_prefix="full_eval")
+    # pre-train tool-call eval via vLLM
+    run_tool_eval_and_log(trainer=trainer, tokenizer=tokenizer, tool_eval_examples=tool_eval_examples,
+                          global_tools=global_tools, max_ctx=max_ctx, prefix="tool_eval_pre")
 
     trainer.train()
 
-    trainer.save_model()
-    trainer.evaluate(eval_dataset, metric_key_prefix="full_eval")
+    # post-train tool-call eval via vLLM
+    run_tool_eval_and_log(trainer=trainer, tokenizer=tokenizer, tool_eval_examples=tool_eval_examples,
+                          global_tools=global_tools, max_ctx=max_ctx, prefix="tool_eval_post")
+
     trainer.push_to_hub(commit_message="train: finish")
 
 
