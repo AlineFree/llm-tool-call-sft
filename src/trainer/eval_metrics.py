@@ -5,7 +5,7 @@ import random
 import re
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 
 import torch
 
@@ -28,10 +28,6 @@ def _deterministic_shuffle_tools(
     tools: List[Dict[str, Any]],
     session_id: str,
 ):
-    """
-    Deterministically shuffle tool list using session_id.
-    Matches training behavior where tool ordering is per-session stable.
-    """
     h = hashlib.sha256(session_id.encode("utf-8")).hexdigest()
     seed_int = int(h[:16], 16)
     rng = random.Random(seed_int)
@@ -45,9 +41,6 @@ def _build_generation_prompt_str(
     context_messages: List[Dict[str, Any]],
     tools_shuffled: List[Dict[str, Any]],
 ) -> str:
-    """
-    Same as _build_generation_input but for text (for vLLM).
-    """
     prompt = tokenizer.apply_chat_template(
         context_messages,
         tools=tools_shuffled,
@@ -61,23 +54,6 @@ def _build_generation_prompt_str(
 def _parse_predicted_tool_calls(
     generated_text: str,
 ) -> Tuple[List[Dict[str, Any]], int]:
-    """
-    Extract tool calls from generated_text.
-
-    We expect spans like:
-    <tool_call>{"function":{"name":"fn","arguments":{...}}}</tool_call>
-
-    Returns:
-      (predicted_calls, parse_failures)
-
-    predicted_calls[i] = {
-        "function": {
-            "name": str,
-            "arguments": <raw or json str>
-        }
-    }
-    parse_failures increments for any block we could not json.loads.
-    """
     predicted_calls: List[Dict[str, Any]] = []
     parse_failures = 0
 
@@ -106,13 +82,6 @@ def _parse_predicted_tool_calls(
 
 
 def _normalize_args(arg_val: Any):
-    """
-    Normalize predicted or gold arguments to dict[str,str].
-    Returns None if parsing fails.
-    - If arg_val is dict: stringify leaf values.
-    - If arg_val is str: try json.loads then same.
-    - Else: None.
-    """
     if isinstance(arg_val, dict):
         obj = arg_val
     elif isinstance(arg_val, str):
@@ -172,23 +141,14 @@ def _f1_precision_recall(
     true_fns: List[str],
     pred_fns: List[str],
 ) -> Tuple[float, float, float]:
-    """
-    Micro precision, recall, F1 over function name multisets.
-    """
     from collections import Counter
     gold_ct = Counter(true_fns)
     pred_ct = Counter(pred_fns)
 
     tp = sum(min(gold_ct[fn], pred_ct[fn]) for fn in pred_ct)
 
-    fp = sum(
-        max(pred_ct[fn] - gold_ct.get(fn, 0), 0)
-        for fn in pred_ct
-    )
-    fn = sum(
-        max(gold_ct[fn] - pred_ct.get(fn, 0), 0)
-        for fn in gold_ct
-    )
+    fp = sum(max(pred_ct[fn] - gold_ct.get(fn, 0), 0) for fn in pred_ct)
+    fn = sum(max(gold_ct[fn] - pred_ct.get(fn, 0), 0) for fn in gold_ct)
 
     prec = tp / (tp + fp) if (tp + fp) > 0 else 0.0
     rec = tp / (tp + fn) if (tp + fn) > 0 else 0.0
@@ -198,22 +158,6 @@ def _f1_precision_recall(
 
 
 def prepare_tool_eval_examples(raw_sessions: List[Dict[str, Any]]) -> List[ToolEvalTurn]:
-    """
-    Build ToolEvalTurn objects for eval.
-
-    raw_sessions[i] must be:
-        {
-            "session_id": str,
-            "messages": [ ... ]  # chat messages including system/user/assistant/tool
-        }
-
-    For every assistant turn in each session:
-    - context_messages is everything before that assistant turn
-    - gold_tool_calls is assistant.tool_calls or []
-    - has_tools is bool(tool_calls)
-
-    Return flat list of ToolEvalTurn.
-    """
     eval_examples: List[ToolEvalTurn] = []
 
     for sess in raw_sessions:
@@ -226,7 +170,6 @@ def prepare_tool_eval_examples(raw_sessions: List[Dict[str, Any]]) -> List[ToolE
 
             tool_calls = m.get("tool_calls", [])
             has_tools = bool(tool_calls)
-
             ctx = msgs[:idx]
 
             eval_examples.append(
@@ -250,26 +193,30 @@ def eval_tool_calls(
     max_new_tokens: int = 256,
     temperature: float = 0.0,
     tensor_parallel_size: int = 1,
+    adapter_path: Optional[str] = None,   # NEW
 ) -> Dict[str, float]:
     """
-    Same metrics as eval_tool_calls, but generation is done by vLLM.
-    Steps:
-      - start vLLM on the saved model
-      - build per-example prompts using the tokenizer chat template
-      - generate
-      - parse and score
-      - destroy vLLM and free CUDA
+    vLLM eval with optional LoRA.
     """
     from vllm import LLM, SamplingParams
+    from vllm.lora.request import LoRARequest
 
-    print('Starting vLLM setup')
-    llm = LLM(
+    print("Starting vLLM setup")
+    llm_kwargs: Dict[str, Any] = dict(
         model=model_path,
-        tokenizer=model_path,  # reuse the saved tokenizer in the same dir
+        tokenizer=model_path,
         tensor_parallel_size=tensor_parallel_size,
         max_model_len=max_model_len,
     )
-    print('vLLM setup done!')
+
+    lora_req = None
+    if adapter_path is not None:
+        llm_kwargs["enable_lora"] = True
+        # name and id are arbitrary but must be stable
+        lora_req = LoRARequest("car-sales", 1, adapter_path)
+
+    llm = LLM(**llm_kwargs)
+    print("vLLM setup done!")
 
     sampling_params = SamplingParams(
         max_tokens=max_new_tokens,
@@ -289,14 +236,17 @@ def eval_tool_calls(
         prompts.append(prompt)
         example_meta.append(ex)
 
-    print('Starting vLLM generation')
-    outputs = llm.generate(prompts, sampling_params)
-    print('vLLM generation done!')
-    # vLLM returns results aligned to input order
+    print("Starting vLLM generation")
+    outputs = llm.generate(
+        prompts,
+        sampling_params,
+        lora_request=lora_req,  # <- apply LoRA here
+    )
+    print("vLLM generation done!")
+
     per_example_metrics: List[Dict[str, Any]] = []
 
     for ex, out in zip(example_meta, outputs):
-        # pick first sequence
         generated_text = out.outputs[0].text
 
         pred_calls, parse_failures = _parse_predicted_tool_calls(generated_text)
@@ -310,7 +260,6 @@ def eval_tool_calls(
                     "hallucinated": hallucinated,
                 }
             )
-            # still count malformed blocks
             continue
 
         gold_fn_names = [c["function"]["name"] for c in gold_calls]
@@ -318,9 +267,7 @@ def eval_tool_calls(
 
         prec, rec, f1 = _f1_precision_recall(gold_fn_names, pred_fn_names)
 
-        # argument-level
         from collections import defaultdict, deque
-
         gold_by_fn = defaultdict(deque)
         for c in gold_calls:
             gold_by_fn[c["function"]["name"]].append(c["function"]["arguments"])
@@ -347,7 +294,6 @@ def eval_tool_calls(
             else:
                 arg_exact_flags.append(0)
 
-        # penalize malformed blocks
         for _ in range(parse_failures):
             arg_parse_flags.append(0)
             arg_exact_flags.append(0)
@@ -363,7 +309,6 @@ def eval_tool_calls(
             }
         )
 
-    # teardown vLLM
     del llm
     gc.collect()
     if torch.cuda.is_available():
