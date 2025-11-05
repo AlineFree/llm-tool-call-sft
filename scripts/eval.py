@@ -1,24 +1,13 @@
 #!/usr/bin/env python3
-"""
-scripts/eval.py
-
-Run tool-calling eval with vLLM against the model published to the hub.
-
-Usage:
-    python scripts/eval.py --config configs/car_sales/qwen3-4b.yaml \
-        [--tensor-parallel-size 1] [--max-model-len 16384]
-
-Requirements:
-    - HF token in env if repo is private:  HF_TOKEN=...
-    - vLLM installed
-"""
-
 import argparse
 import importlib
+import os
+from pathlib import Path
 from typing import Any, Dict
 
 import yaml
 from transformers import AutoTokenizer
+from huggingface_hub import snapshot_download  # NEW
 
 from trainer.eval_metrics import eval_tool_calls
 
@@ -37,7 +26,7 @@ def load_data_module(cfg: Dict[str, Any]):
 
 
 def pick_model_id(cfg: Dict[str, Any]) -> str:
-    # per your request: prefer hub_model_id from train
+    # prefer trained/published model
     train_cfg = cfg.get("train", {})
     hub_id = train_cfg.get("hub_model_id")
     if hub_id:
@@ -60,6 +49,30 @@ def pick_tokenizer_id(cfg: Dict[str, Any], model_id: str) -> str:
     return tok_id or model_id
 
 
+# NEW: make sure we have the model on disk
+def ensure_local_model(model_id: str, cfg: Dict[str, Any]) -> str:
+    """
+    Download HF repo to a deterministic local directory and return that path.
+    Uses HF_TOKEN from env if the repo is private.
+    """
+    # allow overriding in YAML: eval.local_model_root: /workspace/models
+    root = cfg.get("eval", {}).get("local_model_root", "/workspace/models")
+    root_path = Path(root)
+    root_path.mkdir(parents=True, exist_ok=True)
+
+    # avoid slashes inside dir name
+    target_dir = root_path / model_id.replace("/", "__")
+
+    # snapshot_download returns the snapshot dir; we disable symlinks so vLLM
+    # sees a regular directory tree. :contentReference[oaicite:0]{index=0}
+    local_path = snapshot_download(
+        repo_id=model_id,
+        local_dir=str(target_dir),
+        local_dir_use_symlinks=False,
+    )
+    return local_path
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", required=True, help="Path to YAML config")
@@ -72,9 +85,14 @@ def main():
     # 1) figure out model + tokenizer
     model_id = pick_model_id(cfg)
     tokenizer_id = pick_tokenizer_id(cfg, model_id)
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_id, use_fast=False, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(
+        tokenizer_id, use_fast=False, trust_remote_code=True
+    )
 
-    # 2) build tool-eval examples and global tools from the same data module as training
+    # 1b) make sure the model repo is actually on disk
+    local_model_path = ensure_local_model(model_id, cfg)
+
+    # 2) build tool-eval examples and global tools
     data_mod = load_data_module(cfg)
     (
         _train_dataset,
@@ -89,11 +107,13 @@ def main():
     max_new_tokens = int(eval_cfg.get("max_new_tokens_eval", 256))
     temperature = float(eval_cfg.get("temperature", 0.0))
 
-    max_model_len = args.max_model_len or int(cfg["data"].get("max_context_length", max_ctx_from_data))
+    max_model_len = args.max_model_len or int(
+        cfg["data"].get("max_context_length", max_ctx_from_data)
+    )
 
-    # 4) run vLLM-based eval
+    # 4) run vLLM-based eval, but now we hand it the local path
     metrics = eval_tool_calls(
-        model_path=model_id,
+        model_path=local_model_path,  # <- was model_id
         tokenizer=tokenizer,
         examples=tool_eval_examples,
         global_tools=global_tools,
@@ -103,13 +123,10 @@ def main():
         tensor_parallel_size=args.tensor_parallel_size,
     )
 
-    # 5) print result as flat JSON-ish
-    # do not pretty-print too much; simple stdout is fine
+    # 5) print result
     for k, v in metrics.items():
         print(f"{k}: {v}")
 
 
 if __name__ == "__main__":
-    # make sure HF token is used if set
-    # vLLM will pick up HF_TOKEN / HUGGING_FACE_HUB_TOKEN from env
     main()
