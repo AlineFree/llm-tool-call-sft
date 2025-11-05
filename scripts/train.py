@@ -129,8 +129,7 @@ def main():
     )
 
     trainer.train()
-    if is_main_process():
-        trainer.push_to_hub(commit_message="train: finish")
+    trainer.push_to_hub(commit_message="train: finish")
 
 
 if __name__ == "__main__":
