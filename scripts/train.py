@@ -12,7 +12,6 @@ from transformers import TrainingArguments, Trainer, AutoModelForCausalLM
 
 from trainer.lora_model import build_model_and_tokenizer
 from trainer.collate import make_causal_lm_collate_fn
-from trainer.eval_metrics import eval_tool_calls
 
 from dotenv import load_dotenv
 load_dotenv()
