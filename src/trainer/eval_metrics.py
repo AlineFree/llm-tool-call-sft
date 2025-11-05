@@ -288,7 +288,9 @@ def eval_tool_calls(
         prompts.append(prompt)
         example_meta.append(ex)
 
+    print('Starting vLLM generation')
     outputs = llm.generate(prompts, sampling_params)
+    print('vLLM generation done!')
     # vLLM returns results aligned to input order
     per_example_metrics: List[Dict[str, Any]] = []
 

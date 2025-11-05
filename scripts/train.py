@@ -74,7 +74,7 @@ def _export_merged_for_vllm(
     # load base
     base_model = AutoModelForCausalLM.from_pretrained(
         base_model_name,
-        torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+        dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
         trust_remote_code=True,
     )
 
