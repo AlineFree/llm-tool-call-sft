@@ -1,5 +1,6 @@
 import argparse
 import importlib
+import os
 from typing import Any, Dict
 
 import yaml
@@ -7,7 +8,7 @@ import random
 import numpy as np
 import torch
 import torch.distributed as dist
-from transformers import TrainingArguments, Trainer
+from transformers import TrainingArguments, Trainer, AutoModelForCausalLM
 
 from trainer.lora_model import build_model_and_tokenizer
 from trainer.collate import make_causal_lm_collate_fn
@@ -51,6 +52,47 @@ def barrier():
         dist.barrier()
 
 
+def _get_base_model_name(cfg: Dict[str, Any]) -> str:
+    # adapt to your actual config keys
+    model_cfg = cfg.get("model", {})
+    return model_cfg.get("base_model_name")
+
+
+def _export_merged_for_vllm(
+    adapter_dir: str,
+    tokenizer,
+    cfg: Dict[str, Any],
+    export_dir: str,
+):
+    """
+    Build a fresh base model, load LoRA adapter from adapter_dir, merge, and save to export_dir.
+    This gives vLLM a complete HF model folder.
+    """
+    os.makedirs(export_dir, exist_ok=True)
+
+    base_model_name = _get_base_model_name(cfg)
+    # load base
+    base_model = AutoModelForCausalLM.from_pretrained(
+        base_model_name,
+        torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+        trust_remote_code=True,
+    )
+
+    # load adapter onto it
+    from peft import PeftModel
+
+    peft_model = PeftModel.from_pretrained(
+        base_model,
+        adapter_dir,
+        is_trainable=False,
+    )
+
+    merged_model = peft_model.merge_and_unload()
+    merged_model.save_pretrained(export_dir)
+    if tokenizer is not None:
+        tokenizer.save_pretrained(export_dir)
+
+
 def run_vllm_tool_eval_and_log(
     trainer: Trainer,
     tokenizer,
@@ -58,27 +100,37 @@ def run_vllm_tool_eval_and_log(
     global_tools,
     max_ctx: int,
     prefix: str,
+    cfg: Dict[str, Any],
     fsdp_wrapped: bool,
 ):
-    # 1) write model+tokenizer to disk on rank 0
+    # 1) save adapter on rank 0
     if is_main_process():
         if fsdp_wrapped:
-            # after Trainer wrapped the model (after .train()), we can use the HF helper
-            trainer.save_model()
+            trainer.save_model()  # adapter to trainer.args.output_dir
         else:
-            # before training: model is the plain nn.Module, so save it directly
             trainer.model.save_pretrained(trainer.args.output_dir)
         if tokenizer is not None:
             tokenizer.save_pretrained(trainer.args.output_dir)
     barrier()
 
-    # 2) only rank 0 runs vLLM
+    # 2) rank 0 builds merged model dir
+    merged_dir = os.path.join(trainer.args.output_dir, "vllm_merged")
+    if is_main_process():
+        _export_merged_for_vllm(
+            adapter_dir=trainer.args.output_dir,
+            tokenizer=tokenizer,
+            cfg=cfg,
+            export_dir=merged_dir,
+        )
+    barrier()
+
+    # 3) only rank 0 runs vLLM
     if not is_main_process():
         barrier()
         return
 
     metrics = eval_tool_calls(
-        model_path=trainer.args.output_dir,
+        model_path=merged_dir,
         tokenizer=tokenizer,
         examples=tool_eval_examples,
         global_tools=global_tools,
@@ -127,9 +179,10 @@ def main():
         eval_dataset=eval_dataset,
         data_collator=data_collator,
         processing_class=tokenizer,
+        tokenizer_for_tools=tokenizer,
     )
 
-    # pre-train vLLM tool eval (model not FSDP-wrapped yet)
+    # pre-train vLLM tool eval
     run_vllm_tool_eval_and_log(
         trainer=trainer,
         tokenizer=tokenizer,
@@ -137,12 +190,13 @@ def main():
         global_tools=global_tools,
         max_ctx=max_ctx,
         prefix="tool_eval_pre",
+        cfg=cfg,
         fsdp_wrapped=False,
     )
 
     trainer.train()
 
-    # post-train vLLM tool eval (now Trainer has done the wrapping)
+    # post-train vLLM tool eval
     run_vllm_tool_eval_and_log(
         trainer=trainer,
         tokenizer=tokenizer,
@@ -150,6 +204,7 @@ def main():
         global_tools=global_tools,
         max_ctx=max_ctx,
         prefix="tool_eval_post",
+        cfg=cfg,
         fsdp_wrapped=True,
     )
 
