@@ -12,7 +12,7 @@ data:
 model:
   base_model_name: "Qwen/Qwen3-8B"
   torch_dtype: "bfloat16"
-  use_cache: false
+  use_cache: true
 
 lora:
   r: 32
