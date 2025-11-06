@@ -270,56 +270,116 @@ You want to recreate your working virtual environment exactly.
 
 1. Clone the repo.
 
-2. Create and activate a virtualenv:
+2. Create a uv project/env in the repo (no venv needed):
 
    ```bash
-   python3 -m venv .venv
-   source .venv/bin/activate            # macOS / Linux
-   # .venv\Scripts\activate for Windows PowerShell
+   cd your-repo
+   uv init --no-git
    ```
 
-3. Upgrade pip and install dependencies:
+   If `pyproject.toml` already exists, skip init.
+
+3. Install all dependencies from `pyproject.toml` and `requirements.txt`:
 
    ```bash
-   pip install --upgrade pip
-   pip install -r requirements.txt
+   # install main project (editable-style)
+   uv add -e .
+   # also install extra pinned deps from requirements.txt
+   uv pip install -r requirements.txt
    ```
 
-4. Install the repo as an editable package so `car_sales` and `trainer` import cleanly:
+   `uv add -e .` makes the repo importable (`car_sales`, `trainer`, etc.).
+
+4. Run tests:
 
    ```bash
-   pip install -e .
+   uv run pytest -q
    ```
 
-   This uses the `pyproject.toml` in the repo root and tells Python that `src/` is the import root.
-
-5. Run tests:
+5. Run training:
 
    ```bash
-   pytest -q
+   uv run python scripts/train.py --config configs/car_sales.yaml
    ```
 
-6. Run training:
+## Run evaluation and inference
+
+1. Start the model server (base + LoRA)
 
    ```bash
-   python scripts/train.py --config configs/car_sales.yaml
+   uv run vllm serve Qwen/Qwen3-4B-Instruct-2507 \
+     --tokenizer Qwen/Qwen3-4B-Instruct-2507 \
+     --trust-remote-code \
+     --enable-lora \
+     --lora-modules carsales=Salesteq/Qwen3-4B-Instruct-2507-CarSales \
+     --host 0.0.0.0 \
+     --port 8000 \
+     --max_model_len=8192
+   ```
+
+   This exposes an OpenAI-compatible endpoint at `http://0.0.0.0:8000/v1` and registers the LoRA under the name `carsales`.
+
+2. Run the evaluation script against that server
+
+   ```bash
+   uv run python scripts/eval_hosted.py \
+     --config configs/car_sales.yaml \
+     --endpoint http://127.0.0.1:8000/v1 \
+     --model Qwen/Qwen3-4B-Instruct-2507 \
+     --lora-name carsales
+   ```
+
+   The script:
+
+   * loads the dataset from `configs/car_sales.yaml`
+   * sends tool-eval turns to the server
+   * passes `extra_body={"lora_name": "carsales"}` so the adapter is used
+   * prints the tool-call metrics
+
+3. Do ad-hoc inference (Python)
+
+   ```bash
+   uv run python - << 'PY'
+
+    from openai import OpenAI
+    client = OpenAI(base_url="[http://127.0.0.1:8000/v1](http://127.0.0.1:8000/v1)", api_key="EMPTY")
+    
+    resp = client.chat.completions.create(
+    model="Qwen/Qwen3-4B-Instruct-2507",
+    messages=[{"role": "user", "content": "Write a follow-up to a car lead about the Audi A4."}],
+    extra_body={"lora_name": "carsales"},
+    )
+    print(resp.choices[0].message.content)
+    PY
+
+    ```
+
+4. Do ad-hoc inference (curl)
+
+```bash
+curl http://127.0.0.1:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "Qwen/Qwen3-4B-Instruct-2507",
+    "messages": [{"role": "user", "content": "Give me a short reply to a car prospect."}],
+    "extra_body": {"lora_name": "carsales"}
+  }'
+```
+
+---
+
+5. Measure throughput and latency (vLLM bench)
+
+   vLLM ships a simple load tool. Run it against the same model to see tokens/s and latency:
+
+   ```bash
+   vllm bench serve \                                                                                      --model Qwen/Qwen3-4B-Instruct-2507 \                                                                              
+      --base-url http://127.0.0.1:8000 \
+      --dataset-name random \
+      --lora-modules carsales \
+      --max-concurrency 64
    ```
 
 After training finishes, the LoRA adapter and metrics are written under `run.output_dir` from the config.
 
----
 
-## Notes
-
-* Long context examples are filtered, not truncated. This prevents accidental OOM but means you lose those dialogues completely. If you want truncation later, you'd add it to `car_sales/data_prep.py`.
-
-* Timestamps in system prompts are deterministic per session ID. Same session ID always gets the same "Current DateTime (...)" value and the same shuffled section/bullet order. This keeps training labels stable and still teaches the model to handle time.
-
-* Evaluation is task-aware. `tool_eval_examples` tells the trainer exactly when a tool call should or should not happen and with what arguments. The trainer then measures:
-
-  * is a tool call predicted when it should be
-  * is it the right function
-  * are the arguments valid JSON and exact-match
-  * does it avoid hallucinated tool calls when not requested
-
-This enforces tool-use discipline rather than just low perplexity.

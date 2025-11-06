@@ -21,6 +21,7 @@ def main():
     ap.add_argument("--model", required=True, help="Model name as exposed by the server")
     ap.add_argument("--api-key", default="EMPTY")
     ap.add_argument("--max-model-len", type=int, default=None)
+    ap.add_argument("--lora-name", default=None, help="LoRA name registered on the vLLM server, e.g. carsales")
     args = ap.parse_args()
 
     cfg = load_cfg(args.config)
@@ -55,6 +56,7 @@ def main():
         max_model_len=max_model_len,
         max_new_tokens=max_new_tokens,
         temperature=temperature,
+        lora_name=args.lora_name,
     )
 
     for k, v in metrics.items():

@@ -6,7 +6,6 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import List, Dict, Any, Tuple, Optional
 
-import yaml  # only if you still need it elsewhere
 from openai import OpenAI
 
 IGNORE_INDEX = -100
@@ -20,14 +19,11 @@ _TOOL_CALL_BLOCK_RE = re.compile(
 class ToolEvalTurn:
     session_id: str
     context_messages: List[Dict[str, Any]]
-    gold_tool_calls: List[Dict[str, Any]]  # [] if none expected
-    has_tools: bool  # True if gold_tool_calls non-empty
+    gold_tool_calls: List[Dict[str, Any]]
+    has_tools: bool
 
 
-def _deterministic_shuffle_tools(
-    tools: List[Dict[str, Any]],
-    session_id: str,
-):
+def _deterministic_shuffle_tools(tools: List[Dict[str, Any]], session_id: str):
     h = hashlib.sha256(session_id.encode("utf-8")).hexdigest()
     seed_int = int(h[:16], 16)
     rng = random.Random(seed_int)
@@ -36,9 +32,7 @@ def _deterministic_shuffle_tools(
     return tools_copy
 
 
-def _parse_predicted_tool_calls(
-    generated_text: str,
-) -> Tuple[List[Dict[str, Any]], int]:
+def _parse_predicted_tool_calls(generated_text: str) -> Tuple[List[Dict[str, Any]], int]:
     predicted_calls: List[Dict[str, Any]] = []
     parse_failures = 0
 
@@ -83,18 +77,12 @@ def _normalize_args(arg_val: Any):
     return {k: str(v).strip() for k, v in obj.items()}
 
 
-def _aggregate_tool_metrics(
-    per_example: List[Dict[str, Any]],
-) -> Dict[str, float]:
+def _aggregate_tool_metrics(per_example: List[Dict[str, Any]]) -> Dict[str, float]:
     def _safe_mean(x):
         return float(sum(x) / len(x)) if x else 0.0
 
-    all_prec = []
-    all_rec = []
-    all_f1 = []
-    arg_exact = []
-    arg_parse = []
-    halluc = []
+    all_prec, all_rec, all_f1 = [], [], []
+    arg_exact, arg_parse, halluc = [], [], []
     num_tool_turns = 0
     num_no_tool_turns = 0
 
@@ -122,41 +110,32 @@ def _aggregate_tool_metrics(
     }
 
 
-def _f1_precision_recall(
-    true_fns: List[str],
-    pred_fns: List[str],
-) -> Tuple[float, float, float]:
+def _f1_precision_recall(true_fns: List[str], pred_fns: List[str]) -> Tuple[float, float, float]:
     from collections import Counter
     gold_ct = Counter(true_fns)
     pred_ct = Counter(pred_fns)
 
     tp = sum(min(gold_ct[fn], pred_ct[fn]) for fn in pred_ct)
-
     fp = sum(max(pred_ct[fn] - gold_ct.get(fn, 0), 0) for fn in pred_ct)
     fn = sum(max(gold_ct[fn] - pred_ct.get(fn, 0), 0) for fn in gold_ct)
 
     prec = tp / (tp + fp) if (tp + fp) > 0 else 0.0
     rec = tp / (tp + fn) if (tp + fn) > 0 else 0.0
     f1 = (2 * prec * rec / (prec + rec)) if (prec + rec) > 0 else 0.0
-
     return prec, rec, f1
 
 
 def prepare_tool_eval_examples(raw_sessions: List[Dict[str, Any]]) -> List[ToolEvalTurn]:
     eval_examples: List[ToolEvalTurn] = []
-
     for sess in raw_sessions:
         session_id = sess["session_id"]
         msgs = sess["messages"]
-
         for idx, m in enumerate(msgs):
             if m["role"] != "assistant":
                 continue
-
             tool_calls = m.get("tool_calls", [])
             has_tools = bool(tool_calls)
             ctx = msgs[:idx]
-
             eval_examples.append(
                 ToolEvalTurn(
                     session_id=session_id,
@@ -165,23 +144,12 @@ def prepare_tool_eval_examples(raw_sessions: List[Dict[str, Any]]) -> List[ToolE
                     has_tools=has_tools,
                 )
             )
-
     return eval_examples
 
 
-def _truncate_messages_to_ctx(
-    tokenizer,
-    messages: List[Dict[str, Any]],
-    tools: List[Dict[str, Any]],
-    max_model_len: int,
-):
-    """
-    Keep dropping oldest messages until encoded prompt fits max_model_len.
-    Uses the same chat template as training to stay consistent.
-    """
+def _truncate_messages_to_ctx(tokenizer, messages, tools, max_model_len: int):
     if max_model_len is None:
         return messages
-
     msgs = list(messages)
     while True:
         prompt = tokenizer.apply_chat_template(
@@ -206,53 +174,43 @@ def eval_tool_calls(
     max_model_len: int,
     max_new_tokens: int = 256,
     temperature: float = 0.0,
+    lora_name: Optional[str] = None,
 ) -> Dict[str, float]:
-    """
-    Hosted vLLM/OpenAI-style eval. No local model. No LoRA.
-    We rely on the model to emit <tool_call>{...}</tool_call>.
-    """
     per_example_metrics: List[Dict[str, Any]] = []
 
     for ex in examples:
-        # 1) deterministic tool order
         shuffled_tools = _deterministic_shuffle_tools(global_tools, ex.session_id)
 
-        # 2) truncate context to fit
         truncated_messages = _truncate_messages_to_ctx(
             tokenizer, ex.context_messages, shuffled_tools, max_model_len
         )
 
-        # 3) call hosted model
+        extra_body = {}
+        if lora_name:
+            extra_body["lora_name"] = lora_name
+
         resp = client.chat.completions.create(
             model=model,
             messages=truncated_messages,
             tools=shuffled_tools,
             max_tokens=max_new_tokens,
             temperature=temperature,
+            extra_body=extra_body if extra_body else None,
         )
 
         choice = resp.choices[0].message
-        # model should return normal text with <tool_call> blocks
         generated_text = choice.content or ""
 
-        # 4) parse prediction
         pred_calls, parse_failures = _parse_predicted_tool_calls(generated_text)
         gold_calls = ex.gold_tool_calls
 
-        # 5) score
         if not ex.has_tools:
             hallucinated = 1 if len(pred_calls) > 0 else 0
-            per_example_metrics.append(
-                {
-                    "kind": "no_tool",
-                    "hallucinated": hallucinated,
-                }
-            )
+            per_example_metrics.append({"kind": "no_tool", "hallucinated": hallucinated})
             continue
 
         gold_fn_names = [c["function"]["name"] for c in gold_calls]
         pred_fn_names = [c["function"]["name"] for c in pred_calls]
-
         prec, rec, f1 = _f1_precision_recall(gold_fn_names, pred_fn_names)
 
         from collections import defaultdict, deque
@@ -270,9 +228,7 @@ def eval_tool_calls(
                 arg_parse_flags.append(0)
                 arg_exact_flags.append(0)
                 continue
-
             arg_parse_flags.append(1)
-
             if gold_by_fn[fn]:
                 gold_args_norm = _normalize_args(gold_by_fn[fn].popleft())
                 if gold_args_norm is None:
