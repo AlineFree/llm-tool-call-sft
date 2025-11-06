@@ -165,6 +165,34 @@ def _truncate_messages_to_ctx(tokenizer, messages, tools, max_model_len: int):
         msgs = msgs[1:]
 
 
+def _openaiify_messages(messages):
+    """Ensure assistant tool_call messages match OpenAI chat schema."""
+    out = []
+    for m in messages:
+        m = deepcopy(m)
+        tool_calls = m.get("tool_calls")
+        if tool_calls:
+            fixed_calls = []
+            for tc in tool_calls:
+                tc = deepcopy(tc)
+                # required by OpenAI schema
+                tc.setdefault("type", "function")
+
+                fn = tc.get("function", {})
+                args = fn.get("arguments", {})
+                if not isinstance(args, str):
+                    # convert dict -> json string
+                    fn["arguments"] = json.dumps(args)
+                tc["function"] = fn
+                fixed_calls.append(tc)
+
+            m["tool_calls"] = fixed_calls
+            # some datasets omit content for tool-calling assistant messages
+            m.setdefault("content", "")
+        out.append(m)
+    return out
+
+
 def eval_tool_calls(
     client: OpenAI,
     model: str,
@@ -181,9 +209,9 @@ def eval_tool_calls(
     for ex in examples:
         shuffled_tools = _deterministic_shuffle_tools(global_tools, ex.session_id)
 
-        truncated_messages = _truncate_messages_to_ctx(
+        truncated_messages = _openaiify_messages(_truncate_messages_to_ctx(
             tokenizer, ex.context_messages, shuffled_tools, max_model_len
-        )
+        ))
 
         extra_body = {}
         if lora_name:

@@ -300,7 +300,9 @@ You want to recreate your working virtual environment exactly.
      --lora-modules carsales=Salesteq/Qwen3-4B-Instruct-2507-CarSales \
      --host 0.0.0.0 \
      --port 8000 \
-     --max_model_len=8192
+     --max_model_len=8192 \
+     --enable-auto-tool-choice \
+     --tool-call-parser xlam
    ```
 
    This exposes an OpenAI-compatible endpoint at `http://0.0.0.0:8000/v1` and registers the LoRA under the name `carsales`.
