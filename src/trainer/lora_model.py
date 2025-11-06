@@ -108,7 +108,7 @@ def build_model_and_tokenizer(
     _ensure_pad_tokens(
         tokenizer=tokenizer,
         model=model,
-        pad_token_fallback=model_cfg["pad_token_fallback"],
+        pad_token_fallback=model_cfg.get("pad_token_fallback", "eos"),
     )
 
     # build LoRA config and wrap
