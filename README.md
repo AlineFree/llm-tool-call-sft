@@ -269,34 +269,21 @@ No other code changes required because `scripts/train.py` dynamically imports `c
 You want to recreate your working virtual environment exactly.
 
 1. Clone the repo.
-
-2. Create a uv project/env in the repo (no venv needed):
-
-   ```bash
-   cd your-repo
-   uv init --no-git
-   ```
-
-   If `pyproject.toml` already exists, skip init.
-
-3. Install all dependencies from `pyproject.toml` and `requirements.txt`:
+   
+2. Install all dependencies from `pyproject.toml` and `requirements.txt`:
 
    ```bash
    # install main project (editable-style)
-   uv add -e .
-   # also install extra pinned deps from requirements.txt
-   uv pip install -r requirements.txt
+   uv pip install -e .
    ```
 
-   `uv add -e .` makes the repo importable (`car_sales`, `trainer`, etc.).
-
-4. Run tests:
+3. Run tests:
 
    ```bash
    uv run pytest -q
    ```
 
-5. Run training:
+4. Run training:
 
    ```bash
    uv run python scripts/train.py --config configs/car_sales.yaml
@@ -308,7 +295,6 @@ You want to recreate your working virtual environment exactly.
 
    ```bash
    uv run vllm serve Qwen/Qwen3-4B-Instruct-2507 \
-     --tokenizer Qwen/Qwen3-4B-Instruct-2507 \
      --trust-remote-code \
      --enable-lora \
      --lora-modules carsales=Salesteq/Qwen3-4B-Instruct-2507-CarSales \
@@ -322,7 +308,7 @@ You want to recreate your working virtual environment exactly.
 2. Run the evaluation script against that server
 
    ```bash
-   uv run python scripts/eval_hosted.py \
+   uv run python scripts/eval.py \
      --config configs/car_sales.yaml \
      --endpoint http://127.0.0.1:8000/v1 \
      --model Qwen/Qwen3-4B-Instruct-2507 \

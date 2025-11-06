@@ -147,3 +147,7 @@ dependencies = [
     "xxhash>=3.6.0",
     "yarl>=1.22.0",
 ]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+packages = ["car_sales", "trainer"]
