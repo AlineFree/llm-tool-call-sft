@@ -15,8 +15,8 @@ model:
   pad_token_fallback: "eos"
 
 lora:
-  r: 32
-  alpha: 64
+  r: 16
+  alpha: 32
   dropout: 0.05
   target_modules:
     - q_proj
