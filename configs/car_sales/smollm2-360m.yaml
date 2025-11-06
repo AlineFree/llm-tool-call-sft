@@ -74,7 +74,7 @@ train:
     use_orig_params: true
     sync_module_states: true
     forward_prefetch: true
-    state_dict_type: "full"3
+    state_dict_type: "full"
 
 eval:
   max_new_tokens_eval: 256
