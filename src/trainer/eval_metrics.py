@@ -1,13 +1,11 @@
-import asyncio
 import hashlib
 import json
 import random
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import List, Dict, Any, Tuple, Optional
-
-from openai import OpenAI
 
 IGNORE_INDEX = -100
 _TOOL_CALL_BLOCK_RE = re.compile(
@@ -176,7 +174,7 @@ def _openaiify_messages(messages):
     return out
 
 
-async def eval_tool_calls(
+def eval_tool_calls(
     client,
     model: str,
     examples: List["ToolEvalTurn"],
@@ -184,53 +182,40 @@ async def eval_tool_calls(
     max_new_tokens: int = 256,
     temperature: float = 0.0,
     lora_name: Optional[str] = None,
-    concurrency: int = 8,
+    max_workers: int = 8,
 ) -> Dict[str, float]:
-    """
-    Run tool-call evaluation for many examples concurrently.
-    Assumes `client` has an async `chat.completions.create(...)`.
-    """
-
-    sem = asyncio.Semaphore(concurrency)
     per_example_metrics: List[Dict[str, Any]] = []
 
-    async def _run_one(ex: "ToolEvalTurn") -> Optional[Dict[str, Any]]:
+    def _run_one(ex: "ToolEvalTurn") -> Optional[Dict[str, Any]]:
         shuffled_tools = _deterministic_shuffle_tools(global_tools, ex.session_id)
         messages = _openaiify_messages(ex.context_messages)
 
-        # keep original model but allow override
         use_model = lora_name if lora_name else model
         extra_body = {}
-        # if you actually need to send LoRA name in body, add it here
-        # extra_body["lora"] = lora_name
 
-        async with sem:
-            try:
-                resp = await client.chat.completions.create(
-                    model=use_model,
-                    messages=messages,
-                    tools=shuffled_tools,
-                    max_tokens=max_new_tokens,
-                    temperature=temperature,
-                    extra_body=extra_body or None,
-                )
-            except Exception as e:
-                print(f"Error evaluating tool calls for session {ex.session_id}: {e}")
-                return None
+        try:
+            resp = client.chat.completions.create(
+                model=use_model,
+                messages=messages,
+                tools=shuffled_tools,
+                max_tokens=max_new_tokens,
+                temperature=temperature,
+                extra_body=extra_body if extra_body else None,
+            )
+        except Exception as e:
+            print(f"Error evaluating tool calls for session {ex.session_id}: {e}")
+            return None
 
         choice = resp.choices[0].message
         generated_text = choice.content or ""
-        print(generated_text)
 
         pred_calls, parse_failures = _parse_predicted_tool_calls(generated_text)
         gold_calls = ex.gold_tool_calls
 
-        # no tool expected
         if not ex.has_tools:
             hallucinated = 1 if len(pred_calls) > 0 else 0
             return {"kind": "no_tool", "hallucinated": hallucinated}
 
-        # tool expected
         gold_fn_names = [c["function"]["name"] for c in gold_calls]
         pred_fn_names = [c["function"]["name"] for c in pred_calls]
         prec, rec, f1 = _f1_precision_recall(gold_fn_names, pred_fn_names)
@@ -261,7 +246,6 @@ async def eval_tool_calls(
             else:
                 arg_exact_flags.append(0)
 
-        # account for parse failures from the whole message
         for _ in range(parse_failures):
             arg_parse_flags.append(0)
             arg_exact_flags.append(0)
@@ -275,11 +259,13 @@ async def eval_tool_calls(
             "arg_parse_flags": arg_parse_flags,
         }
 
-    # run all
-    results = await asyncio.gather(*[_run_one(ex) for ex in examples])
-
-    for r in results:
-        if r is not None:
-            per_example_metrics.append(r)
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_ex = {
+            executor.submit(_run_one, ex): ex for ex in examples
+        }
+        for future in as_completed(future_to_ex):
+            result = future.result()
+            if result is not None:
+                per_example_metrics.append(result)
 
     return _aggregate_tool_metrics(per_example_metrics)

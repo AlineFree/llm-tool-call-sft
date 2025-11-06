@@ -1,5 +1,4 @@
 import argparse
-import asyncio
 import importlib
 
 import yaml
@@ -41,7 +40,7 @@ def main():
     temperature = float(eval_cfg.get("temperature", 0.0))
     client = OpenAI(base_url=args.endpoint, api_key=args.api_key)
 
-    metrics = asyncio.run(eval_tool_calls(
+    metrics = eval_tool_calls(
         client=client,
         model=args.model,
         examples=tool_eval_examples,
@@ -49,7 +48,7 @@ def main():
         max_new_tokens=max_new_tokens,
         temperature=temperature,
         lora_name=args.lora_name,
-    ))
+    )
 
     for k, v in metrics.items():
         print(f"{k}: {v}")
