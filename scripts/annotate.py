@@ -166,9 +166,10 @@ def main():
                 max_tokens=max_new_tokens,
                 temperature=temperature,
             )
-            out = json.dumps(resp.model_dump(), ensure_ascii=False)
+            out = resp.model_dump()["choices"][0]["message"]
+            out = {"content": out.get("content"), "tool_calls": out.get("tool_calls")}
         except Exception as e:
-            out = json.dumps({"error": str(e)}, ensure_ascii=False)
+            out = {"error": str(e)}
 
         return idx, out
 
